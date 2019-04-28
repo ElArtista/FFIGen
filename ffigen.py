@@ -302,6 +302,89 @@ class NLAdapter:
             return ('struct%s ' % (' ' + decl.name if decl.name else '') +
                     ('containing {%s}' % members if members else ''))
 
+#---------------------------------------------------------------
+# Scheme
+#---------------------------------------------------------------
+class SchemeAdapter:
+    def __init__(self):
+        self.fn_typedefs = []
+
+    def explain(self, node):
+        return self._explain_decl_node(node)
+
+    def _explain_decl_node(self, decl_node):
+        decl = decl_node.type
+        typ = type(decl)
+
+        if [i for i in ['struct', 'typedef'] if i in decl_node.storage]:
+            if type(decl.type) == c_ast.FuncDecl and 'typedef' in decl_node.storage:
+                self.fn_typedefs.append(decl_node.name)
+            return self.spit_ftype(decl_node.name, self._explain_type(decl.type))
+        elif typ == c_ast.FuncDecl:
+            params = [self._explain_type(param) for param in decl.args.params] if decl.args else []
+            params = [] if len(params) == 1 and params[0] == 'void' else params
+            rtype = self._explain_type(decl.type)
+            return self.spit_foreign_procedure(decl_node.name, params, rtype)
+
+        return 'TODO: ' + ' '.join(decl_node.storage) + ' ' + str(typ)
+
+    def spit_foreign_procedure(self, name, params, rtype):
+        return """(define {fn} (foreign-procedure "{fn}" ({param_types}) {rval_type}))""" \
+                .format(fn=name, param_types=' '.join(params), rval_type=rtype)
+
+    def spit_ftype(self, name, ttype):
+        return """(define-ftype {name} {ttype})""".format(name=name, ttype=ttype)
+
+    def transform_param(self, param, proxy_types=True):
+        mappings = {
+            'unsigned char': 'char',
+            'unsigned short': 'unsigned-short',
+            'unsigned int': 'unsigned-int',
+            'unsigned long': 'unsigned-long',
+            'unsigned long long': 'unsigned-long-long',
+            'long long': 'long-long',
+        }
+        if proxy_types:
+            proxy_mappings = {
+                '(* const char)': 'string',
+                '(* char)': 'string',
+            }
+            mappings.update(proxy_mappings)
+        return mappings[param] if param in mappings else param
+
+    def _explain_type(self, decl, proxy_types=True):
+        """ Recursively explains a type decl node """
+        typ = type(decl)
+
+        if typ == c_ast.TypeDecl:
+            tp = self._explain_type(decl.type, proxy_types)
+            return self.transform_param(tp, proxy_types)
+        elif typ == c_ast.Typename or typ == c_ast.Decl:
+            return self._explain_type(decl.type, proxy_types)
+        elif typ == c_ast.IdentifierType:
+            identifier = ' '.join(decl.names)
+            return identifier if not identifier in self.fn_typedefs else '(* {})'.format(identifier)
+        elif typ == c_ast.PtrDecl:
+            ptype = self._explain_type(decl.type, proxy_types)
+            if ptype == 'void': # Possibly other primitive types?
+                ptr = '{}*'.format(ptype)
+            else:
+                ptr = '(* {})'.format(ptype)
+            return ptr if type(decl.type) != c_ast.PtrDecl else 'uptr'
+        elif typ == c_ast.ArrayDecl:
+            arr = '(array {} {})'.format(decl.dim.value, self._explain_type(decl.type, proxy_types))
+            return arr
+        elif typ == c_ast.FuncDecl:
+            params = [self._explain_type(param, proxy_types) for param in decl.args.params]
+            params = [] if len(params) == 1 and params[0] == 'void' else params
+            args = ' '.join(params) if decl.args else ''
+            return '(function ({}) {})'.format(args, self._explain_type(decl.type, proxy_types))
+        elif typ == c_ast.Struct:
+            decls = ['[{} {}]'.format(mem_decl.name, self._explain_type(mem_decl.type, False)) \
+                        for mem_decl in decl.decls] if decl.decls else []
+            members = ' '.join(decls)
+            return '(struct{})'.format((' ' + members if members else ''))
+
 #==============================================================================
 # Handler
 #==============================================================================
@@ -342,7 +425,8 @@ def preprocess(c_src, handler):
 def analyse(c_decl, hander):
     # Sample input
     # c_decl = "char *(*(**foo[][8])())[];"
-    a = NLAdapter()
+    #a = NLAdapter()
+    a = SchemeAdapter()
     r = explain_c_declaration(c_decl, a)
     return r
 
